@@ -995,64 +995,176 @@ func TestExponentialHistogramUnderflowReset(t *testing.T) {
 	testhelper.RunScript(t, NewAdjuster(componenttest.NewNopTelemetrySettings(), time.Minute), script)
 }
 
-func TestSubtractHistogramDataPoint_Underflow(t *testing.T) {
-	hdp := pmetric.NewHistogramDataPoint()
-	hdp.SetStartTimestamp(t2)
-	hdp.SetTimestamp(t2)
-	hdp.SetCount(5)
-	hdp.SetSum(10.0)
-	hdp.ExplicitBounds().FromRaw([]float64{1, 2, 4})
-	hdp.BucketCounts().FromRaw([]uint64{1, 2, 1, 1})
-
-	ref := datapointstorage.HistogramInfo{
-		StartTime:       t1,
-		RefCount:        10,                   // ref count > current count
-		RefSum:          15.0,                 // ref sum > current sum
-		RefBucketCounts: []uint64{2, 1, 3, 1}, // bucket 0 and 2 have ref > current
-		ExplicitBounds:  []float64{1, 2, 4},
+func TestWouldHistogramUnderflow(t *testing.T) {
+	tests := []struct {
+		name           string
+		point          func() pmetric.HistogramDataPoint
+		ref            datapointstorage.HistogramInfo
+		wouldUnderflow bool
+	}{
+		{
+			name: "no underflow",
+			point: func() pmetric.HistogramDataPoint {
+				hdp := pmetric.NewHistogramDataPoint()
+				hdp.SetCount(10)
+				hdp.BucketCounts().FromRaw([]uint64{3, 4})
+				return hdp
+			},
+			ref: datapointstorage.HistogramInfo{
+				RefCount:        5,
+				RefBucketCounts: []uint64{1, 2},
+			},
+			wouldUnderflow: false,
+		},
+		{
+			name: "count would underflow",
+			point: func() pmetric.HistogramDataPoint {
+				hdp := pmetric.NewHistogramDataPoint()
+				hdp.SetCount(4)
+				hdp.BucketCounts().FromRaw([]uint64{2, 2})
+				return hdp
+			},
+			ref: datapointstorage.HistogramInfo{
+				RefCount:        5,
+				RefBucketCounts: []uint64{1, 1},
+			},
+			wouldUnderflow: true,
+		},
+		{
+			name: "bucket count would underflow",
+			point: func() pmetric.HistogramDataPoint {
+				hdp := pmetric.NewHistogramDataPoint()
+				hdp.SetCount(10)
+				hdp.BucketCounts().FromRaw([]uint64{1, 5})
+				return hdp
+			},
+			ref: datapointstorage.HistogramInfo{
+				RefCount:        5,
+				RefBucketCounts: []uint64{2, 3},
+			},
+			wouldUnderflow: true,
+		},
+		{
+			name: "bucket length mismatch does not underflow",
+			point: func() pmetric.HistogramDataPoint {
+				hdp := pmetric.NewHistogramDataPoint()
+				hdp.SetCount(10)
+				hdp.BucketCounts().FromRaw([]uint64{1})
+				return hdp
+			},
+			ref: datapointstorage.HistogramInfo{
+				RefCount:        5,
+				RefBucketCounts: []uint64{2, 3},
+			},
+			wouldUnderflow: false,
+		},
 	}
 
-	subtractHistogramDataPoint(hdp, ref)
-
-	assert.Equal(t, t1, hdp.StartTimestamp())
-	assert.Equal(t, uint64(0), hdp.Count(), "Count should be clamped to 0 without underflow")
-	assert.Equal(t, float64(0), hdp.Sum(), "Sum should be clamped to 0 without underflow")
-	assert.Equal(t, []uint64{0, 1, 0, 0}, hdp.BucketCounts().AsRaw(), "Buckets should be clamped to 0 without underflow")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wouldUnderflow, wouldHistogramUnderflow(tt.point(), tt.ref))
+		})
+	}
 }
 
-func TestSubtractExponentialHistogramDataPoint_Underflow(t *testing.T) {
-	ehdp := pmetric.NewExponentialHistogramDataPoint()
-	ehdp.SetStartTimestamp(t2)
-	ehdp.SetTimestamp(t2)
-	ehdp.SetCount(5)
-	ehdp.SetSum(10.0)
-	ehdp.SetZeroCount(2)
-	ehdp.Positive().SetOffset(1)
-	ehdp.Positive().BucketCounts().FromRaw([]uint64{1, 10})
-	ehdp.Negative().SetOffset(0)
-	ehdp.Negative().BucketCounts().FromRaw([]uint64{1})
-
-	ref := datapointstorage.ExponentialHistogramInfo{
-		StartTime:    t1,
-		RefCount:     10,   // > current 5
-		RefSum:       15.0, // > current 10.0
-		RefZeroCount: 5,    // > current 2
-		RefPositive: datapointstorage.ExponentialHistogramBucketInfo{
-			Offset:       0,
-			BucketCounts: []uint64{0, 5}, // bucket at offset 1 is 5; current bucket at offset 1 is 1 (< 5)
+func TestWouldExponentialHistogramUnderflow(t *testing.T) {
+	tests := []struct {
+		name           string
+		point          func() pmetric.ExponentialHistogramDataPoint
+		ref            datapointstorage.ExponentialHistogramInfo
+		wouldUnderflow bool
+	}{
+		{
+			name: "no underflow",
+			point: func() pmetric.ExponentialHistogramDataPoint {
+				ehdp := pmetric.NewExponentialHistogramDataPoint()
+				ehdp.SetCount(10)
+				ehdp.SetZeroCount(5)
+				ehdp.Positive().SetOffset(0)
+				ehdp.Positive().BucketCounts().FromRaw([]uint64{2, 3})
+				ehdp.Negative().SetOffset(0)
+				ehdp.Negative().BucketCounts().FromRaw([]uint64{1, 2})
+				return ehdp
+			},
+			ref: datapointstorage.ExponentialHistogramInfo{
+				RefCount:     5,
+				RefZeroCount: 2,
+				RefPositive: datapointstorage.ExponentialHistogramBucketInfo{
+					Offset:       0,
+					BucketCounts: []uint64{1, 2},
+				},
+				RefNegative: datapointstorage.ExponentialHistogramBucketInfo{
+					Offset:       0,
+					BucketCounts: []uint64{1, 1},
+				},
+			},
+			wouldUnderflow: false,
 		},
-		RefNegative: datapointstorage.ExponentialHistogramBucketInfo{
-			Offset:       0,
-			BucketCounts: []uint64{3}, // > current 1
+		{
+			name: "count would underflow",
+			point: func() pmetric.ExponentialHistogramDataPoint {
+				ehdp := pmetric.NewExponentialHistogramDataPoint()
+				ehdp.SetCount(4)
+				return ehdp
+			},
+			ref: datapointstorage.ExponentialHistogramInfo{
+				RefCount: 5,
+			},
+			wouldUnderflow: true,
+		},
+		{
+			name: "zero count would underflow",
+			point: func() pmetric.ExponentialHistogramDataPoint {
+				ehdp := pmetric.NewExponentialHistogramDataPoint()
+				ehdp.SetCount(10)
+				ehdp.SetZeroCount(1)
+				return ehdp
+			},
+			ref: datapointstorage.ExponentialHistogramInfo{
+				RefCount:     5,
+				RefZeroCount: 2,
+			},
+			wouldUnderflow: true,
+		},
+		{
+			name: "positive bucket count would underflow with offset shift",
+			point: func() pmetric.ExponentialHistogramDataPoint {
+				ehdp := pmetric.NewExponentialHistogramDataPoint()
+				ehdp.SetCount(10)
+				ehdp.Positive().SetOffset(1)
+				ehdp.Positive().BucketCounts().FromRaw([]uint64{1, 10})
+				return ehdp
+			},
+			ref: datapointstorage.ExponentialHistogramInfo{
+				RefPositive: datapointstorage.ExponentialHistogramBucketInfo{
+					Offset:       0,
+					BucketCounts: []uint64{0, 5},
+				},
+			},
+			wouldUnderflow: true,
+		},
+		{
+			name: "negative bucket count would underflow",
+			point: func() pmetric.ExponentialHistogramDataPoint {
+				ehdp := pmetric.NewExponentialHistogramDataPoint()
+				ehdp.SetCount(10)
+				ehdp.Negative().SetOffset(0)
+				ehdp.Negative().BucketCounts().FromRaw([]uint64{1})
+				return ehdp
+			},
+			ref: datapointstorage.ExponentialHistogramInfo{
+				RefNegative: datapointstorage.ExponentialHistogramBucketInfo{
+					Offset:       0,
+					BucketCounts: []uint64{3},
+				},
+			},
+			wouldUnderflow: true,
 		},
 	}
 
-	subtractExponentialHistogramDataPoint(ehdp, ref)
-
-	assert.Equal(t, t1, ehdp.StartTimestamp())
-	assert.Equal(t, uint64(0), ehdp.Count(), "Count should be clamped to 0 without underflow")
-	assert.Equal(t, float64(0), ehdp.Sum(), "Sum should be clamped to 0 without underflow")
-	assert.Equal(t, uint64(0), ehdp.ZeroCount(), "ZeroCount should be clamped to 0 without underflow")
-	assert.Equal(t, []uint64{0, 10}, ehdp.Positive().BucketCounts().AsRaw(), "Positive bucket count should be clamped to 0 without underflow")
-	assert.Equal(t, []uint64{0}, ehdp.Negative().BucketCounts().AsRaw(), "Negative bucket count should be clamped to 0 without underflow")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wouldUnderflow, wouldExponentialHistogramUnderflow(tt.point(), tt.ref))
+		})
+	}
 }
