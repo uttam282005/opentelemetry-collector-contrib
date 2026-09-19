@@ -1,0 +1,11 @@
+change_type: bug_fix
+
+component: processor/metric_start_time
+
+note: Prevent uint64 arithmetic underflow in subtract_initial_point strategy for malformed histograms and exponential histograms.
+
+issues: [50688]
+
+subtext:
+
+change_logs: [user]

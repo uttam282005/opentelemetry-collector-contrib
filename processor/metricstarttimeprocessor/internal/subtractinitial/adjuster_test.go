@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/xpdata/xhash"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricstarttimeprocessor/internal/datapointstorage"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricstarttimeprocessor/internal/testhelper"
 )
 
@@ -947,4 +949,110 @@ func TestJobGC(t *testing.T) {
 	time.Sleep(5 * time.Second) // Wait for the goroutine to complete.
 	// run job 1, round 2 - verify that all job 1 timeseries have been gc'd
 	testhelper.RunScript(t, ma, job1Script2, "0")
+}
+
+func TestHistogramUnderflowReset(t *testing.T) {
+	script := []*testhelper.MetricsAdjusterTest{
+		{
+			Description: "Histogram: round 1 - initial instance establishes reference",
+			Metrics:     testhelper.Metrics(testhelper.HistogramMetric(histogram1, testhelper.HistogramPoint(k1v1k2v2, t1, t1, bounds0, []uint64{4, 2, 3, 7}))),
+			Adjusted:    testhelper.Metrics(testhelper.HistogramMetric(histogram1)),
+		},
+		{
+			Description: "Histogram: round 2 - bucket count drops below reference (reset triggered, no underflow)",
+			// Bucket 0 is 2, which is < reference bucket 0 (4).
+			Metrics:  testhelper.Metrics(testhelper.HistogramMetric(histogram1, testhelper.HistogramPoint(k1v1k2v2, t2, t2, bounds0, []uint64{2, 3, 4, 8}))),
+			Adjusted: testhelper.Metrics(testhelper.HistogramMetric(histogram1, testhelper.HistogramPoint(k1v1k2v2, t1, t2, bounds0, []uint64{2, 3, 4, 8}))),
+		},
+		{
+			Description: "Histogram: round 3 - instance adjusted after reset",
+			Metrics:     testhelper.Metrics(testhelper.HistogramMetric(histogram1, testhelper.HistogramPoint(k1v1k2v2, t3, t3, bounds0, []uint64{5, 4, 6, 10}))),
+			Adjusted:    testhelper.Metrics(testhelper.HistogramMetric(histogram1, testhelper.HistogramPoint(k1v1k2v2, t1, t3, bounds0, []uint64{5, 4, 6, 10}))),
+		},
+	}
+	testhelper.RunScript(t, NewAdjuster(componenttest.NewNopTelemetrySettings(), time.Minute), script)
+}
+
+func TestExponentialHistogramUnderflowReset(t *testing.T) {
+	script := []*testhelper.MetricsAdjusterTest{
+		{
+			Description: "Exponential Histogram: round 1 - initial instance establishes reference with offset 0",
+			Metrics:     testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1, testhelper.ExponentialHistogramPoint(k1v1k2v2, t1, t1, 3, 0, 0, []uint64{}, 0, []uint64{0, 10}))),
+			Adjusted:    testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1)),
+		},
+		{
+			Description: "Exponential Histogram: round 2 - offset shifted to 1 (reset triggered, no underflow)",
+			// Offset shifted to 1. Bucket counts [1, 10]. Without fix, index 0 subtracted from ref index 1 (1 - 10) causes underflow.
+			Metrics:  testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1, testhelper.ExponentialHistogramPoint(k1v1k2v2, t2, t2, 3, 0, 0, []uint64{}, 1, []uint64{1, 10}))),
+			Adjusted: testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1, testhelper.ExponentialHistogramPoint(k1v1k2v2, t1, t2, 3, 0, 0, []uint64{}, 1, []uint64{1, 10}))),
+		},
+		{
+			Description: "Exponential Histogram: round 3 - instance adjusted after reset",
+			Metrics:     testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1, testhelper.ExponentialHistogramPoint(k1v1k2v2, t3, t3, 3, 0, 0, []uint64{}, 1, []uint64{3, 12}))),
+			Adjusted:    testhelper.Metrics(testhelper.ExponentialHistogramMetric(exponentialHistogram1, testhelper.ExponentialHistogramPoint(k1v1k2v2, t1, t3, 3, 0, 0, []uint64{}, 1, []uint64{3, 12}))),
+		},
+	}
+	testhelper.RunScript(t, NewAdjuster(componenttest.NewNopTelemetrySettings(), time.Minute), script)
+}
+
+func TestSubtractHistogramDataPoint_Underflow(t *testing.T) {
+	hdp := pmetric.NewHistogramDataPoint()
+	hdp.SetStartTimestamp(t2)
+	hdp.SetTimestamp(t2)
+	hdp.SetCount(5)
+	hdp.SetSum(10.0)
+	hdp.ExplicitBounds().FromRaw([]float64{1, 2, 4})
+	hdp.BucketCounts().FromRaw([]uint64{1, 2, 1, 1})
+
+	ref := datapointstorage.HistogramInfo{
+		StartTime:       t1,
+		RefCount:        10,                   // ref count > current count
+		RefSum:          15.0,                 // ref sum > current sum
+		RefBucketCounts: []uint64{2, 1, 3, 1}, // bucket 0 and 2 have ref > current
+		ExplicitBounds:  []float64{1, 2, 4},
+	}
+
+	subtractHistogramDataPoint(hdp, ref)
+
+	assert.Equal(t, t1, hdp.StartTimestamp())
+	assert.Equal(t, uint64(0), hdp.Count(), "Count should be clamped to 0 without underflow")
+	assert.Equal(t, float64(0), hdp.Sum(), "Sum should be clamped to 0 without underflow")
+	assert.Equal(t, []uint64{0, 1, 0, 0}, hdp.BucketCounts().AsRaw(), "Buckets should be clamped to 0 without underflow")
+}
+
+func TestSubtractExponentialHistogramDataPoint_Underflow(t *testing.T) {
+	ehdp := pmetric.NewExponentialHistogramDataPoint()
+	ehdp.SetStartTimestamp(t2)
+	ehdp.SetTimestamp(t2)
+	ehdp.SetCount(5)
+	ehdp.SetSum(10.0)
+	ehdp.SetZeroCount(2)
+	ehdp.Positive().SetOffset(1)
+	ehdp.Positive().BucketCounts().FromRaw([]uint64{1, 10})
+	ehdp.Negative().SetOffset(0)
+	ehdp.Negative().BucketCounts().FromRaw([]uint64{1})
+
+	ref := datapointstorage.ExponentialHistogramInfo{
+		StartTime:    t1,
+		RefCount:     10,   // > current 5
+		RefSum:       15.0, // > current 10.0
+		RefZeroCount: 5,    // > current 2
+		RefPositive: datapointstorage.ExponentialHistogramBucketInfo{
+			Offset:       0,
+			BucketCounts: []uint64{0, 5}, // bucket at offset 1 is 5; current bucket at offset 1 is 1 (< 5)
+		},
+		RefNegative: datapointstorage.ExponentialHistogramBucketInfo{
+			Offset:       0,
+			BucketCounts: []uint64{3}, // > current 1
+		},
+	}
+
+	subtractExponentialHistogramDataPoint(ehdp, ref)
+
+	assert.Equal(t, t1, ehdp.StartTimestamp())
+	assert.Equal(t, uint64(0), ehdp.Count(), "Count should be clamped to 0 without underflow")
+	assert.Equal(t, float64(0), ehdp.Sum(), "Sum should be clamped to 0 without underflow")
+	assert.Equal(t, uint64(0), ehdp.ZeroCount(), "ZeroCount should be clamped to 0 without underflow")
+	assert.Equal(t, []uint64{0, 10}, ehdp.Positive().BucketCounts().AsRaw(), "Positive bucket count should be clamped to 0 without underflow")
+	assert.Equal(t, []uint64{0}, ehdp.Negative().BucketCounts().AsRaw(), "Negative bucket count should be clamped to 0 without underflow")
 }

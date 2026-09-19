@@ -450,6 +450,66 @@ func TestTimeseriesInfo_IsResetExponentialHistogram(t *testing.T) {
 			},
 			expectedReset: false,
 		},
+		{
+			name: "Positive Bucket Offset Changed with Non-Empty Buckets",
+			setupTsi: func() *TimeseriesInfo {
+				tsi := &TimeseriesInfo{}
+				tsi.ExponentialHistogram = ExponentialHistogramInfo{
+					PreviousCount:    10,
+					PreviousPositive: ExponentialHistogramBucketInfo{Offset: 0, BucketCounts: []uint64{1, 2, 3}},
+					PreviousNegative: ExponentialHistogramBucketInfo{},
+				}
+				return tsi
+			},
+			setupEh: func() pmetric.ExponentialHistogramDataPoint {
+				eh := pmetric.NewExponentialHistogramDataPoint()
+				eh.SetCount(10)
+				eh.Positive().SetOffset(1)
+				eh.Positive().BucketCounts().FromRaw([]uint64{1, 2, 3})
+				return eh
+			},
+			expectedReset: true,
+		},
+		{
+			name: "Negative Bucket Offset Changed with Non-Empty Buckets",
+			setupTsi: func() *TimeseriesInfo {
+				tsi := &TimeseriesInfo{}
+				tsi.ExponentialHistogram = ExponentialHistogramInfo{
+					PreviousCount:    10,
+					PreviousPositive: ExponentialHistogramBucketInfo{},
+					PreviousNegative: ExponentialHistogramBucketInfo{Offset: 0, BucketCounts: []uint64{1, 2, 3}},
+				}
+				return tsi
+			},
+			setupEh: func() pmetric.ExponentialHistogramDataPoint {
+				eh := pmetric.NewExponentialHistogramDataPoint()
+				eh.SetCount(10)
+				eh.Negative().SetOffset(1)
+				eh.Negative().BucketCounts().FromRaw([]uint64{1, 2, 3})
+				return eh
+			},
+			expectedReset: true,
+		},
+		{
+			name: "Positive Bucket Offset Changed with Empty Buckets",
+			setupTsi: func() *TimeseriesInfo {
+				tsi := &TimeseriesInfo{}
+				tsi.ExponentialHistogram = ExponentialHistogramInfo{
+					PreviousCount:    10,
+					PreviousPositive: ExponentialHistogramBucketInfo{Offset: 0, BucketCounts: []uint64{}},
+					PreviousNegative: ExponentialHistogramBucketInfo{},
+				}
+				return tsi
+			},
+			setupEh: func() pmetric.ExponentialHistogramDataPoint {
+				eh := pmetric.NewExponentialHistogramDataPoint()
+				eh.SetCount(10)
+				eh.Positive().SetOffset(1)
+				eh.Positive().BucketCounts().FromRaw([]uint64{})
+				return eh
+			},
+			expectedReset: false,
+		},
 	}
 
 	for _, tt := range tests {
