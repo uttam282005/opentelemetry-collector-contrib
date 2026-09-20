@@ -328,7 +328,6 @@ func subtractExponentialHistogramDataPoint(a pmetric.ExponentialHistogramDataPoi
 	if a.Positive().BucketCounts().Len() != len(ref.RefPositive.BucketCounts) ||
 		a.Negative().BucketCounts().Len() != len(ref.RefNegative.BucketCounts) {
 		// Post reset, the reference histogram will have no buckets.
-		// Don't adjust the buckets in this case.
 		return
 	}
 	a.Positive().BucketCounts().FromRaw(subtractExponentialBuckets(a.Positive(), ref.RefPositive))
